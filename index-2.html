@@ -1,0 +1,1382 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Cozy Café Manager</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#2c1810;
+  touch-action:none;-webkit-touch-callout:none;
+  -webkit-user-select:none;user-select:none;
+  -webkit-tap-highlight-color:transparent;
+  overscroll-behavior:none}
+/* Dynamische viewporthoogte: voorkomt dat de Safari-adresbalk op iPad/iPhone
+   de canvas te groot laat berekenen, waardoor het onderste deel wegvalt. */
+@supports (height: 100dvh){
+  html,body{height:100dvh}
+}
+canvas{display:block;image-rendering:pixelated;image-rendering:crisp-edges}
+</style>
+</head>
+<body>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.60.0/phaser.min.js"
+        onerror="var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js';document.head.appendChild(s);"></script>
+<script>
+'use strict';
+function __boot(){
+
+// ============================================================
+//  CONSTANTS
+// ============================================================
+const W=1024,H=768,CAFE_W=682,CX=CAFE_W,CW=W-CAFE_W,HUD_H=48;
+const CUST_PATIENCE_MS=26000; // hoe lang een gast geduldig wacht (ms)
+
+const COL={
+  hudBg:'#3E2723',hudText:'#FFE0B2',
+  cafeBg:'#F5E6D3',cafeFloor:'#D7B899',
+  counterBg:'#EEDCC0',
+  tableDark:'#5D4037',tableTop:'#795548',chair:'#8D6E63',
+  wallTop:'#EFEBE9',winFrame:'#6D4C41',winGlass:'#B3E5FC',
+  signOpen:'#4CAF50',signClosed:'#F44336',
+  espresso:'#78909C',frother:'#CE93D8',blender:'#80DEEA',
+  oven:'#D84315',waffle:'#FFB74D',teaMaker:'#81C784',
+  emptySlot:'#BDBDBD',
+  servSlot:'#FFFFFF',bell:'#FFD54F',bellBase:'#FFA000',
+  trash:'#B71C1C',trashLid:'#D32F2F',
+  waiterShirt:'#FAFAFA',waiterPants:'#37474F',
+  coffeeBeans:'#4E342E',milk:'#FAFAFA',pastry:'#F9A825',
+  fruit:'#C62828',tea:'#388E3C',cacao:'#5D4037',
+  cust:['#E57373','#64B5F6','#81C784','#FFB74D','#BA68C8','#4DD0E1','#FF8A65','#AED581'],
+  speechBg:'#FFFDE7',speechBrd:'#FFD54F',
+  dayBg:'#87CEEB',nightBg:'#1A237E',sunsetBg:'#FF8A65',
+  btnPri:'#6D4C41',btnTxt:'#FFF8E1',btnGreen:'#388E3C',btnGrey:'#9E9E9E',
+  overlay:'rgba(0,0,0,0.75)'
+};
+
+const TABLE_POS=[
+  {x:220,y:210},{x:460,y:210},
+  {x:220,y:390},{x:460,y:390},
+  {x:220,y:560},{x:460,y:560}
+];
+
+// Storage layout (top of counter, 2 rows × 3 cols)
+const STOR={
+  coffeeBeans:{col:0,row:0,label:'Koffie',color:COL.coffeeBeans},
+  milk:       {col:1,row:0,label:'Melk',  color:COL.milk},
+  pastry:     {col:2,row:0,label:'Deeg',  color:COL.pastry},
+  fruit:      {col:0,row:1,label:'Fruit', color:COL.fruit},
+  tea:        {col:1,row:1,label:'Thee',  color:COL.tea},
+  cacao:      {col:2,row:1,label:'Cacao', color:COL.cacao}
+};
+// Compute pixel positions
+const storX=c=>CX+57+c*114, storY=r=>HUD_H+44+r*64;
+for(const k in STOR){STOR[k].x=storX(STOR[k].col);STOR[k].y=storY(STOR[k].row);}
+
+// Appliance slot grid (3 rows × 2 cols)
+const APP_COLS=[CX+100,CX+242], APP_ROWS=[HUD_H+210,HUD_H+320,HUD_H+430];
+const APP_SLOT_POS=[];
+for(let r=0;r<3;r++) for(let c=0;c<2;c++) APP_SLOT_POS.push({x:APP_COLS[c],y:APP_ROWS[r]});
+
+// Serving counter (bottom of counter area)
+const SERV_Y=HUD_H+560;
+const SERV_SLOT_X=[CX+57,CX+171,CX+285];
+
+// Appliance type definitions
+const APP_TYPES={
+  espressoMachine:{label:'Espresso',color:COL.espresso,baseTime:2200},
+  milkFrother:    {label:'Opschuimer',color:COL.frother,baseTime:2000},
+  blender:        {label:'Blender',color:COL.blender,baseTime:1800},
+  oven:           {label:'Oven',color:COL.oven,baseTime:3000,price:30},
+  waffleIron:     {label:'Wafelmaker',color:COL.waffle,baseTime:2800,price:40},
+  teaMaker:       {label:'Theezetter',color:COL.teaMaker,baseTime:2000,price:25}
+};
+
+// ============================================================
+//  RECIPES  (26 known + 8 mystery)
+// ============================================================
+const RECIPES={
+  // espressoMachine
+  espresso:      {n:'Espresso',       p:2.50,app:'espressoMachine',ing:{coffeeBeans:1},icon:'☕'},
+  doppio:        {n:'Doppio',         p:3.50,app:'espressoMachine',ing:{coffeeBeans:2},icon:'☕'},
+  mokka:         {n:'Mokka',          p:4.00,app:'espressoMachine',ing:{coffeeBeans:1,cacao:1},icon:'☕'},
+  // milkFrother
+  warmMilk:      {n:'Warme Melk',     p:2.00,app:'milkFrother',ing:{milk:1},icon:'🥛'},
+  cappuccino:    {n:'Cappuccino',     p:3.50,app:'milkFrother',ing:{coffeeBeans:1,milk:1},icon:'☕'},
+  latte:         {n:'Caffè Latte',    p:4.00,app:'milkFrother',ing:{coffeeBeans:1,milk:2},icon:'☕'},
+  hotChocolate:  {n:'Warme Choco',    p:3.50,app:'milkFrother',ing:{cacao:1,milk:1},icon:'🍫'},
+  matchaLatte:   {n:'Matcha Latte',   p:4.50,app:'milkFrother',ing:{tea:1,milk:1},icon:'🍵'},
+  speculaasLatte:{n:'Speculaaslatte', p:4.75,app:'milkFrother',ing:{coffeeBeans:1,milk:1,cacao:1},icon:'☕'},
+  // blender
+  fruitSmoothie: {n:'Fruit Smoothie', p:4.00,app:'blender',ing:{fruit:2},icon:'🥤'},
+  berryBlast:    {n:'Berry Blast',    p:5.50,app:'blender',ing:{fruit:3},icon:'🥤'},
+  chocoShake:    {n:'Choco Shake',    p:4.00,app:'blender',ing:{cacao:1,milk:1},icon:'🥤'},
+  tropicalMix:   {n:'Tropical Mix',   p:5.00,app:'blender',ing:{fruit:2,milk:1},icon:'🥤'},
+  // oven
+  croissant:     {n:'Croissant',      p:2.50,app:'oven',ing:{pastry:1},icon:'🥐'},
+  painChocolat:  {n:'Pain au Choco',  p:3.50,app:'oven',ing:{pastry:1,cacao:1},icon:'🥐'},
+  applePie:      {n:'Appeltaart',     p:5.50,app:'oven',ing:{pastry:2,fruit:1},icon:'🥧'},
+  muffin:        {n:'Muffin',         p:3.00,app:'oven',ing:{pastry:1,milk:1},icon:'🧁'},
+  cinnamonRoll:  {n:'Kaneelrol',      p:3.50,app:'oven',ing:{pastry:2},icon:'🍩'},
+  // waffleIron
+  belgianWaffle: {n:'Belgische Wafel',p:4.50,app:'waffleIron',ing:{pastry:1,milk:1},icon:'🧇'},
+  chocoWaffle:   {n:'Chocoladewafel', p:5.00,app:'waffleIron',ing:{pastry:1,cacao:1},icon:'🧇'},
+  fruitWaffle:   {n:'Fruitwafel',     p:5.50,app:'waffleIron',ing:{pastry:1,fruit:1},icon:'🧇'},
+  luxeWaffle:    {n:'Luxe Wafel',     p:7.00,app:'waffleIron',ing:{pastry:1,milk:1,fruit:1},icon:'🧇'},
+  // teaMaker
+  greenTea:      {n:'Groene Thee',    p:2.50,app:'teaMaker',ing:{tea:1},icon:'🍵'},
+  herbalTea:     {n:'Kruidenthee',    p:3.50,app:'teaMaker',ing:{tea:2},icon:'🍵'},
+  icedTea:       {n:'IJsthee',        p:4.00,app:'teaMaker',ing:{tea:1,fruit:1},icon:'🍵'},
+  chaiLatte:     {n:'Chai Latte',     p:5.00,app:'teaMaker',ing:{tea:2,milk:1},icon:'🍵'},
+  chocoTea:      {n:'Choco Thee',     p:3.50,app:'teaMaker',ing:{tea:1,cacao:1},icon:'🍵'}
+};
+
+const MYSTERY=[
+  'Combineer koffie en cacao op een bijzondere manier...',
+  'Probeer fruit met thee in een verrassend apparaat...',
+  'Ontdek de ultieme wafel met drie ingrediënten...',
+  'Geheime mix van het huis — alleen voor kenners...',
+  'Oud familierecept — vraag de groothandel...',
+  'Seizoensspecialiteit met exotisch fruit...',
+  'Meesterwerk: de perfecte combinatie van zoet en bitter...',
+  'Verborgen delicatesse — wie durft te experimenteren?'
+];
+
+// ============================================================
+//  SAVE / LOAD
+// ============================================================
+const SAVE_KEY='cozyCafe_v3';
+function defSave(){
+  return{
+    day:1,weekDay:1,money:50,
+    tablesUnlocked:2,servingSlotsUnlocked:1,
+    inv:{coffeeBeans:20,milk:15,pastry:10,fruit:8,tea:0,cacao:0},
+    // 6 appliance slots: first 3 filled, rest null
+    appSlots:['espressoMachine','milkFrother','blender',null,null,null],
+    appLevels:{espressoMachine:1,milkFrother:1,blender:1,oven:1,waffleIron:1,teaMaker:1,waiterSpeed:1},
+    totalEarnings:0,customersServed:0
+  };
+}
+function load(){
+  try{
+    const r=localStorage.getItem(SAVE_KEY);
+    if(!r)return defSave();
+    const d=JSON.parse(r),df=defSave();
+    for(const k in df){
+      if(d[k]===undefined)d[k]=df[k];
+      else if(typeof df[k]==='object'&&!Array.isArray(df[k]))
+        for(const s in df[k])if(d[k][s]===undefined)d[k][s]=df[k][s];
+    }
+    if(!Array.isArray(d.appSlots)||d.appSlots.length!==6)d.appSlots=df.appSlots;
+    return d;
+  }catch(e){console.warn('Save corrupt',e);return defSave();}
+}
+function save(s){try{localStorage.setItem(SAVE_KEY,JSON.stringify(s));}catch(e){}}
+
+// ============================================================
+//  HELPER: hex string → int
+// ============================================================
+const hx=s=>parseInt(s.replace('#',''),16);
+
+// ============================================================
+//  BOOT SCENE
+// ============================================================
+class BootScene extends Phaser.Scene{
+  constructor(){super('Boot');}
+  preload(){
+    // ------------------------------------------------------------------
+    // Alle spelafbeeldingen worden als losse PNG-bestanden geladen vanuit
+    // dezelfde map (root) als dit HTML-bestand. Voorheen stonden ze hier
+    // als base64 data-URI's inline in het script; dat maakte het bestand
+    // extreem groot (>1,5 MB tekst) en zorgde voor laad-/renderproblemen.
+    // ------------------------------------------------------------------
+    const ASSETS = [
+      // Recepten met eigen artwork (espressomachine, opschuimer, blender,
+      // oven, wafelmaker, theezetter)
+      'spr_rec_chocoTea','spr_rec_icedTea','spr_rec_greenTea','spr_rec_fruitWaffle','spr_rec_herbalTea',
+      'spr_rec_belgianWaffle','spr_rec_chocoWaffle','spr_rec_applePie','spr_rec_luxeWaffle','spr_rec_croissant',
+      'spr_rec_cinnamonRoll','spr_rec_muffin','spr_rec_painChocolat','spr_rec_chaiLatte','spr_rec_speculaasLatte',
+      'spr_rec_chocoShake','spr_rec_berryBlast','spr_rec_tropicalMix','spr_rec_fruitSmoothie','spr_rec_espresso',
+      'spr_rec_doppio','spr_rec_mokka','spr_rec_warmMilk','spr_rec_cappuccino','spr_rec_latte',
+      'spr_rec_hotChocolate','spr_rec_matchaLatte',
+      // Bordje dicht
+      'spr_sign_closed',
+      // Ingredient-tokens (uitgesneden uit de voorraadbak-emblemen)
+      'spr_ing_coffeeBeans','spr_ing_milk','spr_ing_pastry','spr_ing_fruit','spr_ing_tea',
+      'spr_ing_cacao',
+      // UI- en interieurelementen
+      'spr_speech','spr_trash','ui_btn_w','spr_servlocked','ui_btn_start',
+      'ui_btn','ui_btn_grey','spr_app_empty','spr_sign_open','spr_servslot',
+      'spr_bell',
+      // Voorraadbak-emblemen
+      'spr_stor_pastry','spr_stor_fruit','spr_stor_coffeeBeans','spr_stor_tea','spr_stor_cacao',
+      'spr_stor_milk',
+      // Apparaten
+      'spr_app_waffleIron','spr_app_blender','spr_app_espressoMachine','spr_app_milkFrother','spr_app_oven',
+      'spr_app_teaMaker',
+      // Personages
+      'spr_waiter','spr_cust_1','spr_cust_2','spr_cust_3','spr_cust_4',
+      'spr_cust_5','spr_cust_6','spr_cust_7',
+      // Meubilair
+      'spr_table','spr_chair','spr_door','spr_window',
+      // Achtergronden
+      'bg_cafe','bg_counter'
+    ];
+    for(const key of ASSETS) this.load.image(key, key+'.png');
+  }
+  create(){
+    const g=this.make.graphics({add:false});
+    const rr=(f,x,y,w,h,r,str)=>{g.fillStyle(f,1);g.fillRoundedRect(x,y,w,h,r);if(str){g.lineStyle(2,str,1);g.strokeRoundedRect(x,y,w,h,r);}};
+
+    // spr_table wordt geladen via preload() (Gertjan's eigen asset)
+
+    // spr_chair wordt geladen via preload() (Gertjan's eigen asset)
+
+    // spr_cust_1 t/m spr_cust_7 en spr_waiter worden geladen via preload() (Gertjan's eigen assets)
+
+    // spr_app_espressoMachine t/m spr_app_teaMaker worden geladen via preload() (Gertjan's eigen assets)
+
+    // spr_app_empty wordt geladen via preload() (Gertjan's eigen asset)
+
+    // Storage: spr_stor_pastry t/m spr_stor_milk worden geladen via preload() (Gertjan's eigen assets)
+
+    // spr_ing_coffeeBeans t/m spr_ing_cacao worden geladen via preload() (uitgesneden uit voorraadbak-emblemen)
+
+    // Recipe items (skip de 8 die al echte artwork hebben via preload)
+    const RECIPES_WITH_ART = ['espresso','doppio','mokka','warmMilk','cappuccino','latte','hotChocolate','matchaLatte','speculaasLatte','chocoShake','berryBlast','tropicalMix','fruitSmoothie','belgianWaffle','chocoWaffle','applePie','luxeWaffle','croissant','cinnamonRoll','muffin','painChocolat','chaiLatte','icedTea','greenTea','fruitWaffle','herbalTea','chocoTea'];
+    for(const[k,r]of Object.entries(RECIPES)){
+      if(RECIPES_WITH_ART.includes(k)) continue;
+      const rc=r.app?APP_TYPES[r.app]:null;
+      const col=rc?hx(rc.color):0x888888;
+      g.clear();rr(col,0,0,36,36,6,0x333333);
+      g.fillStyle(0xFFFFFF,0.3);g.fillRect(6,4,24,3);
+      g.generateTexture('spr_rec_'+k,36,36);g.clear();
+    }
+
+    // spr_servslot en spr_servlocked worden geladen via preload() (Gertjan's eigen assets)
+
+    // spr_bell wordt geladen via preload() (Gertjan's eigen asset)
+
+    // spr_trash wordt geladen via preload() (Gertjan's eigen asset)
+
+    // Signs
+    // spr_sign_open wordt geladen via preload() (Gertjan's eigen asset)
+    // spr_sign_closed wordt geladen via preload() (Gertjan's eigen asset)
+
+    // spr_window wordt geladen via preload() (Gertjan's eigen asset)
+
+    // spr_door wordt geladen via preload() (Gertjan's eigen asset)
+
+    // spr_speech wordt geladen via preload() (Gertjan's eigen asset)
+
+    // ui_btn, ui_btn_w, ui_btn_start, ui_btn_grey worden geladen via preload() (Gertjan's eigen assets)
+
+    g.destroy();
+    this.scene.start('Game');
+  }
+}
+
+// ============================================================
+//  GAME SCENE
+// ============================================================
+class GameScene extends Phaser.Scene{
+  constructor(){super('Game');}
+
+  create(){
+    this.st=load(); // game state
+    this.audioOK=false;
+    this.dayGoal=this.calcGoal(); // dagdoel (verdiensten) voor spanning
+    this.goalReached=false; this.lastBonus=0;
+    this.phase='CLOSED'; // CLOSED OPEN CLOSING SUMMARY WHOLESALE
+    this.gameMinute=480; // 08:00 = 480 minutes
+    this.timeAccum=0;
+    this.dayEarn=0; this.dayCust=0;
+    this.customers=[];
+    this.servSlots=[]; // {recipeKey,sprite} or null, length = servingSlotsUnlocked
+    for(let i=0;i<3;i++) this.servSlots.push(null);
+    this.waiterBusy=false;
+    this.custTimer=0; this.custInterval=7000;
+    this.activeTokens=[]; // floating ingredient tokens
+    this.overlayGrp=null;
+
+    // Appliance runtime states (indexed by slot 0-5)
+    this.appStates=[];
+    for(let i=0;i<6;i++){
+      this.appStates.push({loaded:{},processing:false,done:false,doneRecipe:null});
+    }
+
+    this.buildCafe();
+    this.buildCounter();
+    this.buildHUD();
+    this.setupDrag();
+
+    // Audio unlock
+    this.input.once('pointerdown',()=>{
+      if(this.sound.context&&this.sound.context.state==='suspended')this.sound.context.resume();
+      this.audioOK=true;
+    });
+    this.game.canvas.addEventListener('touchstart',e=>e.preventDefault(),{passive:false});
+    this.game.canvas.addEventListener('touchmove',e=>e.preventDefault(),{passive:false});
+
+    // Muiswiel-scroll voor de groothandel
+    this._wsScroll=null;
+    this.input.on('wheel',(p,go,dx,dy)=>{if(this.phase==='WHOLESALE'&&this._wsScroll)this._wsScroll(dy);});
+  }
+
+  // owned appliance types
+  ownedApps(){return this.st.appSlots.filter(a=>a!==null);}
+
+  // available recipes (for customer ordering)
+  availableRecipes(){
+    const owned=new Set(this.ownedApps());
+    return Object.keys(RECIPES).filter(k=>owned.has(RECIPES[k].app));
+  }
+
+  // ---- CAFÉ AREA ----
+  buildCafe(){
+    // Achtergrond-afbeelding (wand + vloer, leeg canvas voor overlay-sprites)
+    this.add.image(CAFE_W/2,H/2,'bg_cafe').setDepth(0);
+    // Donker-overlay voor dag/nacht effect (interieur wordt 's avonds gedimd, niet blauw getint)
+    this.skyRect=this.add.rectangle(CAFE_W/2,H/2,CAFE_W,H,0x000000,0).setDepth(1);
+
+    // Windows
+    this.windows=[];
+    [200,380,540].forEach(wx=>{
+      this.windows.push(this.add.image(wx,HUD_H+55,'spr_window').setDepth(2).setScale(1));
+    });
+
+    // Door — far left
+    this.add.image(50,H-100,'spr_door').setDepth(2).setScale(1);
+
+    // Open/close sign (near door)
+    this.sign=this.add.image(50,H-155,'spr_sign_closed').setDepth(5)
+      .setInteractive(new Phaser.Geom.Rectangle(-10,-10,100,56),Phaser.Geom.Rectangle.Contains);
+    this.signTxt=this.add.text(50,H-155,'GESLOTEN',{
+      fontFamily:'Arial',fontSize:'12px',fontStyle:'bold',color:'#FFF'
+    }).setOrigin(0.5).setDepth(6);
+    this.sign.on('pointerdown',()=>this.toggleOpen());
+
+    // Tables
+    this.tables=[];
+    for(let i=0;i<6;i++){
+      const p=TABLE_POS[i], ul=i<this.st.tablesUnlocked;
+      const t=this.add.image(p.x,p.y,'spr_table').setDepth(3);
+      const cL=this.add.image(p.x-58,p.y+20,'spr_chair').setDepth(4);
+      const cR=this.add.image(p.x+58,p.y+20,'spr_chair').setDepth(4);
+      if(!ul){t.setAlpha(0.2);cL.setAlpha(0.2);cR.setAlpha(0.2);}
+      this.tables.push({i,x:p.x,y:p.y,ul,spr:t,chL:cL,chR:cR,occ:false});
+    }
+
+    // Waiter (right side of café area)
+    this.waiter=this.add.image(CAFE_W-50,H-90,'spr_waiter').setDepth(8).setScale(1);
+
+    // Bell — near waiter in café area
+    this.bellSpr=this.add.image(CAFE_W-50,H-145,'spr_bell').setDepth(9).setScale(1)
+      .setInteractive(new Phaser.Geom.Rectangle(-10,-10,72,68),Phaser.Geom.Rectangle.Contains);
+    this.add.text(CAFE_W-50,H-170,'🔔',{fontSize:'16px'}).setOrigin(0.5).setDepth(10);
+    this.bellSpr.on('pointerdown',()=>this.ringBell());
+
+    // Trash can — near bell/waiter
+    this.trashSpr=this.add.image(CAFE_W-120,H-90,'spr_trash').setDepth(9).setScale(1);
+    this.add.text(CAFE_W-120,H-120,'🗑️',{fontSize:'14px'}).setOrigin(0.5).setDepth(10);
+    // Drop zone for trash
+    this.trashZone=this.add.zone(CAFE_W-120,H-90,64,64).setRectangleDropZone(64,64).setDepth(8);
+
+    // Divider
+    this.add.rectangle(CX,H/2,4,H,hx(COL.tableDark)).setDepth(10);
+    // Counter bg
+    this.add.image(CX+CW/2,H/2,'bg_counter').setDepth(0);
+  }
+
+  // ---- COUNTER AREA ----
+  buildCounter(){
+    this.add.text(CX+CW/2,HUD_H+2,'─ Voorraad ─',{fontFamily:'Arial',fontSize:'10px',color:'#8D6E63'}).setOrigin(0.5).setDepth(10);
+
+    // Storage
+    this.storSpr={};this.storCnt={};
+    for(const[k,s]of Object.entries(STOR)){
+      const sp=this.add.image(s.x,s.y,'spr_stor_'+k).setDepth(10)
+        .setInteractive(new Phaser.Geom.Rectangle(-8,-8,72,62),Phaser.Geom.Rectangle.Contains);
+      this.add.text(s.x,s.y+29,s.label,{fontFamily:'Arial',fontSize:'9px',color:'#5D4037'}).setOrigin(0.5,0).setDepth(11);
+      const ct=this.add.text(s.x+20,s.y-18,String(this.st.inv[k]||0),{
+        fontFamily:'Arial',fontSize:'12px',fontStyle:'bold',color:'#FFF',backgroundColor:'#5D4037',padding:{x:3,y:1}
+      }).setOrigin(0.5).setDepth(12);
+      sp.on('pointerdown',()=>this.spawnIng(k));
+      this.storSpr[k]=sp;this.storCnt[k]=ct;
+    }
+
+    // Appliances section
+    this.add.text(CX+CW/2,HUD_H+165,'─ Apparaten ─',{fontFamily:'Arial',fontSize:'10px',color:'#8D6E63'}).setOrigin(0.5).setDepth(10);
+
+    this.appSprites=[];this.appStartBtns=[];this.appStatusTxts=[];this.appLabels=[];
+    for(let i=0;i<6;i++){
+      const pos=APP_SLOT_POS[i];
+      const type=this.st.appSlots[i];
+      const texKey=type?'spr_app_'+type:'spr_app_empty';
+      const spr=this.add.image(pos.x,pos.y,texKey).setDepth(10).setInteractive({useHandCursor:true});
+
+      // Label
+      const lbl=this.add.text(pos.x,pos.y+40,type?APP_TYPES[type].label:'Leeg',{
+        fontFamily:'Arial',fontSize:'9px',color:'#5D4037'
+      }).setOrigin(0.5,0).setDepth(11);
+
+      // Status text
+      const st=this.add.text(pos.x,pos.y-40,'',{
+        fontFamily:'Arial',fontSize:'8px',color:'#333',backgroundColor:'#FFFFFFCC',padding:{x:2,y:1}
+      }).setOrigin(0.5).setDepth(12).setVisible(false);
+
+      // Start button
+      const btnTex=type?'ui_btn_grey':'ui_btn_grey';
+      const btn=this.add.image(pos.x,pos.y+58,btnTex).setDepth(10)
+        .setInteractive(new Phaser.Geom.Rectangle(-4,-4,64,34),Phaser.Geom.Rectangle.Contains);
+      const btnTxt=this.add.text(pos.x,pos.y+58,'Start',{
+        fontFamily:'Arial',fontSize:'10px',fontStyle:'bold',color:'#FFF'
+      }).setOrigin(0.5).setDepth(11);
+      if(!type){btn.setVisible(false);btnTxt.setVisible(false);}
+      btn.on('pointerdown',()=>this.pressStart(i));
+
+      this.appSprites.push(spr);
+      this.appStartBtns.push({img:btn,txt:btnTxt});
+      this.appStatusTxts.push(st);
+      this.appLabels.push(lbl);
+    }
+
+    // Serving counter
+    this.add.text(CX+CW/2,SERV_Y-40,'─ Uitgifte ─',{fontFamily:'Arial',fontSize:'10px',color:'#8D6E63'}).setOrigin(0.5).setDepth(10);
+
+    this.servSprites=[];
+    for(let i=0;i<3;i++){
+      const x=SERV_SLOT_X[i];
+      const unlocked=i<this.st.servingSlotsUnlocked;
+      const spr=this.add.image(x,SERV_Y,unlocked?'spr_servslot':'spr_servlocked').setDepth(10);
+      if(!unlocked)spr.setAlpha(0.5);
+      this.servSprites.push(spr);
+    }
+
+    // Instruction
+    this.add.text(CX+CW/2,H-16,'Tik voorraad → sleep naar apparaat → Start',{
+      fontFamily:'Arial',fontSize:'8px',color:'#FFF8E1',fontStyle:'italic',
+      backgroundColor:'#3E2723CC',padding:{x:6,y:2}
+    }).setOrigin(0.5).setDepth(11);
+  }
+
+  // ---- HUD ----
+  buildHUD(){
+    this.add.rectangle(W/2,HUD_H/2,W,HUD_H,hx(COL.hudBg)).setDepth(50);
+
+    this.add.text(10,HUD_H/2,'☕ Cozy Café',{
+      fontFamily:'Georgia,serif',fontSize:'16px',fontStyle:'bold',color:COL.hudText
+    }).setOrigin(0,0.5).setDepth(51);
+
+    // Money
+    this.moneyTxt=this.add.text(180,HUD_H/2,'💰 €'+this.st.money.toFixed(2),{
+      fontFamily:'Arial',fontSize:'14px',fontStyle:'bold',color:'#A5D6A7'
+    }).setOrigin(0,0.5).setDepth(51);
+
+    // Clock
+    this.clockTxt=this.add.text(W/2,HUD_H/2,'08:00',{
+      fontFamily:'monospace',fontSize:'16px',fontStyle:'bold',color:COL.hudText
+    }).setOrigin(0.5).setDepth(51);
+
+    // Day info
+    const dn=['Zo','Ma','Di','Wo','Do','Vr','Za'];
+    this.dayTxt=this.add.text(W/2+80,HUD_H/2,dn[(this.st.weekDay-1)%7]+' — Dag '+this.st.day,{
+      fontFamily:'Arial',fontSize:'12px',color:COL.hudText
+    }).setOrigin(0,0.5).setDepth(51);
+
+    // Day/night dot
+    this.dnDot=this.add.circle(W/2-40,HUD_H/2,6,0xFFEB3B).setDepth(51);
+
+    // Dagdoel (voortgang verdiensten)
+    this.goalTxt=this.add.text(300,HUD_H/2,'🎯 €0/'+this.dayGoal,{
+      fontFamily:'Arial',fontSize:'13px',fontStyle:'bold',color:'#FFCC80'
+    }).setOrigin(0,0.5).setDepth(51);
+
+    // Menu button (top right)
+    const menuBtn=this.add.text(W-60,HUD_H/2,'📋 Menu',{
+      fontFamily:'Arial',fontSize:'13px',fontStyle:'bold',color:COL.hudText,
+      backgroundColor:'#5D4037',padding:{x:8,y:4}
+    }).setOrigin(0.5).setDepth(52).setInteractive({useHandCursor:true});
+    menuBtn.on('pointerdown',()=>this.showMenu());
+  }
+
+  updHUD(){
+    this.moneyTxt.setText('💰 €'+this.st.money.toFixed(2));
+    const dn=['Zo','Ma','Di','Wo','Do','Vr','Za'];
+    this.dayTxt.setText(dn[(this.st.weekDay-1)%7]+' — Dag '+this.st.day);
+    const h=Math.floor(this.gameMinute/60),m=Math.floor(this.gameMinute%60);
+    this.clockTxt.setText(String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'));
+    if(this.goalTxt){
+      const done=this.dayEarn>=this.dayGoal;
+      this.goalTxt.setText((done?'🎯✅ €':'🎯 €')+this.dayEarn.toFixed(0)+'/'+this.dayGoal);
+      this.goalTxt.setColor(done?'#A5D6A7':'#FFCC80');
+    }
+  }
+
+  calcGoal(){return 20+(this.st.day-1)*10;} // schaalt mee met de dag
+
+  updStorCounts(){
+    for(const k in STOR){
+      const c=this.st.inv[k]||0;
+      this.storCnt[k].setText(String(c));
+      this.storCnt[k].setColor(c>0?'#FFF':'#FF5252');
+    }
+  }
+
+  // ---- INGREDIENT SPAWNING (no deduction on tap) ----
+  spawnIng(type){
+    const c=this.st.inv[type]||0;
+    if(c<=0){this.toast(STOR[type].label+' is op!','#FF5252');return;}
+
+    const s=STOR[type];
+    const tok=this.add.image(s.x,s.y-30,'spr_ing_'+type)
+      .setDepth(30).setScale(1.2).setInteractive({useHandCursor:true});
+    tok.ingType=type;tok.ox=s.x;tok.oy=s.y-30;
+    this.input.setDraggable(tok,true);
+    this.activeTokens.push(tok);
+    this.tweens.add({targets:tok,scale:{from:0.4,to:1.2},duration:180,ease:'Back.easeOut'});
+    this.sfx('pop');
+  }
+
+  // ---- DRAG & DROP ----
+  setupDrag(){
+    this.input.on('dragstart',(p,o)=>{o.setScale(1.5).setDepth(100);});
+    this.input.on('drag',(p,o,dx,dy)=>{o.x=dx;o.y=dy;});
+    this.input.on('dragend',(p,o)=>{
+      // --- Ingredient token ---
+      if(o.ingType){
+        // Check drop on appliance slots
+        for(let i=0;i<6;i++){
+          const pos=APP_SLOT_POS[i];
+          if(!this.st.appSlots[i])continue; // empty slot
+          if(Phaser.Math.Distance.Between(o.x,o.y,pos.x,pos.y)<50){
+            if(this.loadIng(i,o.ingType)){
+              this.removeToken(o);o.destroy();
+              this.updAppStatus(i);
+              return;
+            }
+          }
+        }
+        // Not placed → snap back, no cost
+        this.tweens.add({targets:o,x:o.ox,y:o.oy,scale:1.2,duration:180,
+          onComplete:()=>{this.removeToken(o);o.destroy();}});
+        return;
+      }
+      // --- Finished recipe item ---
+      if(o.recKey){
+        // Check serving slots
+        for(let i=0;i<this.st.servingSlotsUnlocked;i++){
+          const sx=SERV_SLOT_X[i];
+          if(Phaser.Math.Distance.Between(o.x,o.y,sx,SERV_Y)<45&&!this.servSlots[i]){
+            this.placeServing(i,o.recKey,o);return;
+          }
+        }
+        // Check trash
+        if(Phaser.Math.Distance.Between(o.x,o.y,CAFE_W-120,H-90)<50){
+          this.removeToken(o);
+          this.tweens.add({targets:o,scale:0,alpha:0,duration:200,onComplete:()=>o.destroy()});
+          this.toast('🗑️ Weggegooid','#B71C1C');this.sfx('pop');return;
+        }
+        // Snap back
+        this.tweens.add({targets:o,x:o.ox,y:o.oy,scale:1.2,duration:200});
+        return;
+      }
+      // --- Item FROM serving slot (drag to trash) ---
+      if(o.servIdx!==undefined){
+        if(Phaser.Math.Distance.Between(o.x,o.y,CAFE_W-120,H-90)<50){
+          this.servSlots[o.servIdx]=null;
+          this.tweens.add({targets:o,scale:0,alpha:0,duration:200,onComplete:()=>o.destroy()});
+          this.toast('🗑️ Weggegooid','#B71C1C');this.sfx('pop');return;
+        }
+        // Snap back to slot
+        const sx=SERV_SLOT_X[o.servIdx];
+        this.tweens.add({targets:o,x:sx,y:SERV_Y,scale:1.1,duration:200});
+        return;
+      }
+    });
+  }
+
+  removeToken(tok){
+    const idx=this.activeTokens.indexOf(tok);
+    if(idx>-1)this.activeTokens.splice(idx,1);
+  }
+
+  loadIng(slotIdx,ingType){
+    const as=this.appStates[slotIdx];
+    const appType=this.st.appSlots[slotIdx];
+    if(as.processing||as.done)return false;
+
+    // Check if useful for any recipe on this appliance
+    let useful=false;
+    for(const[rk,r]of Object.entries(RECIPES)){
+      if(r.app!==appType)continue;
+      if(r.ing[ingType]){
+        if((as.loaded[ingType]||0)<r.ing[ingType]){useful=true;break;}
+      }
+    }
+    if(!useful){this.toast('Past hier niet','#FF9800');return false;}
+
+    // Deduct inventory NOW (on successful load)
+    if((this.st.inv[ingType]||0)<=0){this.toast(STOR[ingType].label+' is op!','#FF5252');return false;}
+    this.st.inv[ingType]--;
+    this.updStorCounts();
+
+    as.loaded[ingType]=(as.loaded[ingType]||0)+1;
+    this.sfx('pop');
+    return true;
+  }
+
+  updAppStatus(slotIdx){
+    const as=this.appStates[slotIdx];
+    const st=this.appStatusTxts[slotIdx];
+    const appType=this.st.appSlots[slotIdx];
+    if(!appType){st.setVisible(false);return;}
+
+    const entries=Object.entries(as.loaded).filter(([,v])=>v>0);
+    if(entries.length===0&&!as.done){
+      st.setVisible(false);
+      this.appSprites[slotIdx].clearTint();
+      this.appStartBtns[slotIdx].img.setTexture('ui_btn_grey');
+      return;
+    }
+
+    if(as.done){
+      st.setText(RECIPES[as.doneRecipe].n+' klaar!').setVisible(true);
+      this.appSprites[slotIdx].setTint(0x4CAF50);
+      this.appStartBtns[slotIdx].img.setTexture('ui_btn_grey');
+      return;
+    }
+
+    const parts=entries.map(([k,v])=>(STOR[k]?STOR[k].label:k)+'×'+v);
+    st.setText(parts.join(', ')).setVisible(true);
+
+    const matched=this.matchRecipe(slotIdx);
+    if(matched){
+      this.appSprites[slotIdx].setTint(0x66BB6A);
+      this.appStartBtns[slotIdx].img.setTexture('ui_btn_start');
+      st.setText(parts.join(', ')+' ✓');
+    }else{
+      this.appSprites[slotIdx].clearTint();
+      this.appStartBtns[slotIdx].img.setTexture('ui_btn_grey');
+    }
+  }
+
+  matchRecipe(slotIdx){
+    const as=this.appStates[slotIdx];
+    const appType=this.st.appSlots[slotIdx];
+    const loadedKeys=Object.keys(as.loaded).filter(k=>as.loaded[k]>0);
+    let exact=null, superset=null, supN=0;
+    for(const[rk,r]of Object.entries(RECIPES)){
+      if(r.app!==appType)continue;
+      let ok=true,n=0;
+      for(const[ing,need]of Object.entries(r.ing)){
+        if((as.loaded[ing]||0)<need){ok=false;break;}
+        n+=need;
+      }
+      if(!ok)continue;
+      // Exact = precies dezelfde ingrediënten én aantallen als ingeladen
+      const recKeys=Object.keys(r.ing);
+      const sameSet=recKeys.length===loadedKeys.length&&recKeys.every(k=>(as.loaded[k]||0)===r.ing[k]);
+      if(sameSet){exact=rk;break;}
+      if(n>supN){superset=rk;supN=n;}
+    }
+    return exact||superset;
+  }
+
+  // ---- START BUTTON ----
+  pressStart(slotIdx){
+    const appType=this.st.appSlots[slotIdx];
+    if(!appType)return;
+    const as=this.appStates[slotIdx];
+
+    // If done, spawn finished item
+    if(as.done&&as.doneRecipe){
+      this.spawnFinished(slotIdx);return;
+    }
+    if(as.processing)return;
+
+    const matched=this.matchRecipe(slotIdx);
+    if(!matched){
+      if(Object.keys(as.loaded).length>0)this.toast('Recept nog niet compleet','#FF9800');
+      return;
+    }
+
+    // Start processing
+    as.processing=true;
+    const recipe=RECIPES[matched];
+    for(const[ing,need]of Object.entries(recipe.ing)){
+      as.loaded[ing]-=need;
+      if(as.loaded[ing]<=0)delete as.loaded[ing];
+    }
+
+    const spr=this.appSprites[slotIdx];
+    spr.setTint(0xFFD54F);
+    this.appStatusTxts[slotIdx].setText('Bereiden...').setVisible(true);
+    this.appStartBtns[slotIdx].img.setTexture('ui_btn_grey');
+
+    const lvl=this.st.appLevels[appType]||1;
+    const base=APP_TYPES[appType].baseTime;
+    const t=Math.max(600,base-(lvl-1)*500);
+
+    this.tweens.add({targets:spr,scaleX:{from:0.95,to:1.05},scaleY:{from:1.05,to:0.95},
+      duration:t/4,yoyo:true,repeat:3});
+
+    this.sfx('process');
+    this.time.delayedCall(t,()=>{
+      as.processing=false;as.done=true;as.doneRecipe=matched;
+      spr.setTint(0x4CAF50);
+      this.appStatusTxts[slotIdx].setText(recipe.n+' klaar! Tik Start').setVisible(true);
+      this.sfx('done');
+    });
+  }
+
+  spawnFinished(slotIdx){
+    const as=this.appStates[slotIdx];
+    const pos=APP_SLOT_POS[slotIdx];
+    const rk=as.doneRecipe;
+    as.done=false;as.doneRecipe=null;
+    this.appSprites[slotIdx].clearTint();
+    this.updAppStatus(slotIdx);
+
+    const item=this.add.image(pos.x,pos.y,'spr_rec_'+rk)
+      .setDepth(30).setScale(1.2).setInteractive({useHandCursor:true});
+    item.recKey=rk;item.ox=pos.x;item.oy=pos.y;
+    this.input.setDraggable(item,true);
+    this.activeTokens.push(item); // zodat endDay ook zwevende gerechten opruimt
+    this.tweens.add({targets:item,scale:{from:0.3,to:1.2},duration:250,ease:'Back.easeOut'});
+    this.toast(RECIPES[rk].icon+' '+RECIPES[rk].n+' → sleep naar uitgifte','#4CAF50');
+  }
+
+  placeServing(idx,recKey,spr){
+    // Item leeft nu op de uitgifte (servSlots beheert het) → uit activeTokens halen
+    this.removeToken(spr);
+    // Make item on serving counter also draggable (for trash)
+    spr.setPosition(SERV_SLOT_X[idx],SERV_Y).setScale(1.1).setDepth(15);
+    spr.recKey=undefined; // Clear so drag handler doesn't re-process
+    spr.servIdx=idx;
+    // Keep it draggable for trash
+    this.servSlots[idx]={recipeKey:recKey,sprite:spr};
+    this.sfx('place');
+  }
+
+  // ---- BELL & WAITER ----
+  ringBell(){
+    if(this.waiterBusy){this.toast('Bediende is bezig...','#FF9800');return;}
+
+    // Find first serving slot with a matching customer (ORDER INDEPENDENT)
+    let found=null;
+    for(let i=0;i<this.st.servingSlotsUnlocked;i++){
+      if(!this.servSlots[i])continue;
+      const rk=this.servSlots[i].recipeKey;
+      const cust=this.customers.find(c=>(c.state==='WAITING'||c.state==='ORDERING')&&c.want===rk);
+      if(cust){found={slot:i,cust};break;}
+    }
+    if(!found){
+      // Check if there are items but no matching customers
+      const hasItems=this.servSlots.some(s=>s!==null);
+      this.toast(hasItems?'Geen gast wacht op dit product':'Uitgifte is leeg!','#FF9800');
+      return;
+    }
+
+    // Bell animation
+    this.tweens.add({targets:this.bellSpr,angle:{from:-15,to:15},duration:80,yoyo:true,repeat:3,
+      onComplete:()=>this.bellSpr.setAngle(0)});
+    this.sfx('bell');
+
+    const{slot,cust}=found;
+    const itemSpr=this.servSlots[slot].sprite;
+    this.servSlots[slot]=null;
+    cust.state='SERVED';
+    this.waiterBusy=true;
+
+    const slotX=SERV_SLOT_X[slot];
+    const tbl=this.tables[cust.tblIdx];
+    const spd=200+(3-(this.st.appLevels.waiterSpeed||1))*80;
+
+    // Walk to counter
+    this.tweens.add({targets:this.waiter,x:slotX-40,y:SERV_Y,duration:spd*2,onComplete:()=>{
+      itemSpr.destroy();
+      // Walk to table
+      this.tweens.add({targets:this.waiter,x:tbl.x+30,y:tbl.y+10,duration:spd*3,onComplete:()=>{
+        this.serveCust(cust);
+        // Walk back
+        this.tweens.add({targets:this.waiter,x:CAFE_W-50,y:H-90,duration:spd*2,
+          onComplete:()=>{this.waiterBusy=false;}});
+      }});
+    }});
+  }
+
+  serveCust(c){
+    const r=RECIPES[c.want];
+    c.state='EATING';
+    if(c.bubble)c.bubble.setVisible(false);
+    if(c.bIcon)c.bIcon.setVisible(false);
+    if(c.pbg)c.pbg.setVisible(false);
+    if(c.pfill)c.pfill.setVisible(false);
+    if(c.happy)c.happy.destroy();
+    c.happy=this.add.text(c.x,c.y-45,'😊',{fontSize:'24px'}).setOrigin(0.5).setDepth(20);
+
+    this.time.delayedCall(2200,()=>{
+      // Gast kan intussen geforceerd verwijderd zijn (sluitingstijd) → geen spookinkomsten
+      if(this.customers.indexOf(c)===-1||c.state!=='EATING')return;
+      this.collectMoney(r.p,c.x,c.y);
+      c.state='LEAVING';this.dayCust++;this.st.customersServed++;
+      if(c.happy)c.happy.destroy();
+      this.tweens.add({targets:c.spr,x:50,y:H-100,alpha:0,duration:1200,
+        onComplete:()=>{this.removeCust(c);
+          if(this.phase==='CLOSING'&&this.customers.length===0)this.endDay();}});
+    });
+  }
+
+  collectMoney(amt,fx,fy){
+    this.st.money+=amt;this.dayEarn+=amt;this.st.totalEarnings+=amt;this.updHUD();
+    const ct=this.add.text(fx,fy,'+€'+amt.toFixed(2),{
+      fontFamily:'Arial',fontSize:'16px',fontStyle:'bold',color:'#4CAF50',
+      stroke:'#FFF',strokeThickness:2
+    }).setOrigin(0.5).setDepth(60);
+    this.tweens.add({targets:ct,x:180,y:HUD_H/2,scale:{from:1.2,to:0.5},alpha:{from:1,to:0},
+      duration:900,ease:'Cubic.easeIn',onComplete:()=>ct.destroy()});
+    this.sfx('money');
+  }
+
+  // ---- CUSTOMERS ----
+  spawnCust(){
+    if(this.phase!=='OPEN')return;
+    let tbl=null;
+    for(const t of this.tables){if(t.ul&&!t.occ){tbl=t;break;}}
+    if(!tbl)return;
+    tbl.occ=true;
+
+    const avail=this.availableRecipes();
+    if(avail.length===0)return;
+    const want=Phaser.Utils.Array.GetRandom(avail);
+
+    const cn=Phaser.Math.Between(1,7);
+    const spr=this.add.image(50,H-100,'spr_cust_'+cn).setDepth(7).setScale(1)
+      .setInteractive({useHandCursor:true});
+    const bubble=this.add.image(tbl.x,tbl.y-55,'spr_speech').setDepth(19).setVisible(false);
+    const bIcon=this.add.text(tbl.x,tbl.y-62,RECIPES[want].icon,{fontSize:'20px'})
+      .setOrigin(0.5).setDepth(20).setVisible(false);
+    // Geduld-meter (achtergrond + vulling), boven de spraakbubbel
+    const pbg=this.add.rectangle(tbl.x,tbl.y-84,52,7,0x000000,0.35).setDepth(19).setVisible(false);
+    const pfill=this.add.rectangle(tbl.x-25,tbl.y-84,50,5,0x4CAF50).setOrigin(0,0.5).setDepth(20).setVisible(false);
+    const c={spr,x:tbl.x,y:tbl.y+10,tblIdx:tbl.i,want,state:'ENTERING',bubble,bIcon,happy:null,
+      patience:1,pMax:CUST_PATIENCE_MS,pbg,pfill};
+    spr.on('pointerdown',()=>this.tapCust(c));
+    this.customers.push(c);
+
+    this.tweens.add({targets:spr,x:tbl.x-36,y:tbl.y+10,duration:1400,ease:'Sine.easeInOut',
+      onComplete:()=>{
+        c.state='ORDERING';bubble.setVisible(true);bIcon.setVisible(true);
+        pbg.setVisible(true);pfill.setVisible(true); // geduld begint nu te lopen
+        this.tweens.add({targets:[bubble,bIcon],scale:{from:0,to:1},duration:250,ease:'Back.easeOut'});
+      }});
+  }
+
+  tapCust(c){
+    if(c.state!=='ORDERING'&&c.state!=='WAITING')return;
+    const r=RECIPES[c.want];
+    // Check ingredients
+    let canMake=true;const miss=[];
+    for(const[ing,n]of Object.entries(r.ing)){
+      if((this.st.inv[ing]||0)<n){canMake=false;miss.push(STOR[ing].label);}
+    }
+    if(!canMake){
+      this.toast('Tekort: '+miss.join(', '),'#FF9800');
+      this.time.delayedCall(1500,()=>{
+        const alts=this.availableRecipes().filter(rk=>{
+          if(rk===c.want)return false;
+          const rc=RECIPES[rk];
+          for(const[i,n]of Object.entries(rc.ing))if((this.st.inv[i]||0)<n)return false;
+          return true;
+        });
+        if(alts.length>0){
+          c.want=Phaser.Utils.Array.GetRandom(alts);
+          c.bIcon.setText(RECIPES[c.want].icon);
+          c.state='WAITING'; // meteen klaar om bereid te worden
+          this.toast('Gast kiest: '+RECIPES[c.want].n,'#4CAF50');
+        }else{
+          this.toast('Gast vertrekt 👋','#90A4AE');c.state='LEAVING';
+          this.tweens.add({targets:c.spr,x:50,y:H-100,alpha:0,duration:1200,
+            onComplete:()=>{this.removeCust(c);
+              if(this.phase==='CLOSING'&&this.customers.length===0)this.endDay();}});
+        }
+      });
+    }else{
+      c.state='WAITING';
+      const appLabel=APP_TYPES[r.app]?APP_TYPES[r.app].label:r.app;
+      const parts=Object.entries(r.ing).map(([k,v])=>(STOR[k]?STOR[k].label:k)+'×'+v);
+      this.toast(r.icon+' '+r.n+': '+parts.join('+')+' → '+appLabel,'#2196F3');
+    }
+  }
+
+  // ---- GEDULD ----
+  updatePatience(delta){
+    if(this.phase!=='OPEN'&&this.phase!=='CLOSING')return;
+    for(const c of [...this.customers]){
+      if(c.state!=='ORDERING'&&c.state!=='WAITING')continue;
+      c.patience-=delta/c.pMax;
+      if(c.patience<=0){c.patience=0;this.customerLeaveUnhappy(c);continue;}
+      c.pfill.scaleX=Math.max(0,c.patience);
+      const col=c.patience>0.5?0x4CAF50:(c.patience>0.25?0xFFB300:0xE53935);
+      c.pfill.setFillStyle(col);
+    }
+  }
+
+  customerLeaveUnhappy(c){
+    if(c.state==='LEAVING'||c.state==='EATING'||c.state==='SERVED')return;
+    c.state='LEAVING';
+    if(c.bubble)c.bubble.setVisible(false);
+    if(c.bIcon)c.bIcon.setVisible(false);
+    if(c.pbg)c.pbg.setVisible(false);
+    if(c.pfill)c.pfill.setVisible(false);
+    const ang=this.add.text(c.x,c.y-45,'😞',{fontSize:'22px'}).setOrigin(0.5).setDepth(20);
+    this.tweens.add({targets:ang,alpha:0,y:c.y-70,duration:1200,onComplete:()=>ang.destroy()});
+    this.toast('Gast vertrok ongeduldig 😞','#E53935');
+    this.tweens.add({targets:c.spr,x:50,y:H-100,alpha:0,duration:1200,
+      onComplete:()=>{this.removeCust(c);
+        if(this.phase==='CLOSING'&&this.customers.length===0)this.endDay();}});
+  }
+
+  removeCust(c){
+    const t=this.tables[c.tblIdx];if(t)t.occ=false;
+    if(c.bubble)c.bubble.destroy();if(c.bIcon)c.bIcon.destroy();
+    if(c.pbg)c.pbg.destroy();if(c.pfill)c.pfill.destroy();
+    if(c.happy)c.happy.destroy();if(c.spr)c.spr.destroy();
+    const idx=this.customers.indexOf(c);if(idx>-1)this.customers.splice(idx,1);
+  }
+
+  // ---- OPEN / CLOSE / TIME ----
+  toggleOpen(){
+    if(this.phase==='SUMMARY'||this.phase==='WHOLESALE')return;
+    if(this.phase==='CLOSED'){
+      this.phase='OPEN';this.gameMinute=480;this.dayEarn=0;this.dayCust=0;
+      this._endTimer=false;
+      this.dayGoal=this.calcGoal();
+      this.sign.setTexture('spr_sign_open');this.signTxt.setText('OPEN');
+      this.custTimer=0;this.updHUD();
+      this.toast('Café geopend! ☀️','#4CAF50');
+    }else if(this.phase==='OPEN'){
+      this.phase='CLOSING';
+      this.sign.setTexture('spr_sign_closed');this.signTxt.setText('DICHT');
+      this.toast('Sluit... gasten maken rustig af','#FF9800');
+      if(this.customers.length===0)this.time.delayedCall(500,()=>this.endDay());
+    }
+  }
+
+  endDay(){
+    this.phase='SUMMARY';
+    // Clear appliance states
+    for(let i=0;i<6;i++){
+      this.appStates[i]={loaded:{},processing:false,done:false,doneRecipe:null};
+      this.appSprites[i].clearTint();
+      this.appStatusTxts[i].setVisible(false);
+      if(this.st.appSlots[i])this.appStartBtns[i].img.setTexture('ui_btn_grey');
+    }
+    // Clear serving
+    for(let i=0;i<3;i++){if(this.servSlots[i]){if(this.servSlots[i].sprite)this.servSlots[i].sprite.destroy();this.servSlots[i]=null;}}
+    // Clear floating tokens
+    this.activeTokens.forEach(t=>{if(t&&t.scene)t.destroy();});
+    this.activeTokens=[];
+
+    // Dagdoel afrekenen + bonus
+    this.finishedGoal=this.dayGoal;
+    this.goalReached=this.dayEarn>=this.dayGoal;
+    this.lastBonus=this.goalReached?Math.round(this.dayGoal*0.2):0;
+    if(this.lastBonus>0){this.st.money+=this.lastBonus;this.st.totalEarnings+=this.lastBonus;}
+
+    this.st.day++;this.st.weekDay++;
+    this.dayGoal=this.calcGoal(); // doel voor de nieuwe dag
+    save(this.st);
+    this.showSummary();
+  }
+
+  showSummary(){
+    this.clearOverlay();
+    const g=this.overlayGrp=this.add.group();
+    const ov=this.add.rectangle(W/2,H/2,W,H,0x000000,0.75).setDepth(80).setInteractive();g.add(ov);
+    const pan=this.add.rectangle(W/2,H/2,440,380,0xFFF8E1).setDepth(81).setStrokeStyle(3,hx(COL.tableDark));g.add(pan);
+    const prev=this.st.day-1;
+    g.add(this.add.text(W/2,H/2-130,'☀️ Dag '+prev+' klaar!',{fontFamily:'Georgia,serif',fontSize:'20px',fontStyle:'bold',color:'#3E2723'}).setOrigin(0.5).setDepth(82));
+    const goalLine=this.goalReached
+      ? '🎯 Doel €'+this.finishedGoal+' gehaald! ⭐'
+      : '🎯 Doel: €'+this.dayEarn.toFixed(0)+' / €'+this.finishedGoal+' (net niet)';
+    const lines=[
+      'Gasten bediend: '+this.dayCust,
+      'Verdiensten: € '+this.dayEarn.toFixed(2),
+      goalLine];
+    if(this.lastBonus>0)lines.push('🎁 Bonus: € '+this.lastBonus.toFixed(2));
+    lines.push('Saldo: € '+this.st.money.toFixed(2),'','💾 Opgeslagen!');
+    g.add(this.add.text(W/2,H/2-60,lines.join('\n'),
+      {fontFamily:'Arial',fontSize:'14px',color:'#5D4037',align:'center',lineSpacing:6}).setOrigin(0.5).setDepth(82));
+
+    const isWS=(this.st.weekDay-1)%7===0&&this.st.weekDay>1;
+    const bLabel=isWS?'🛒 Naar Groothandel':'→ Volgende Dag';
+    const btn=this.add.image(W/2,H/2+100,'ui_btn_w').setDepth(82).setInteractive({useHandCursor:true});g.add(btn);
+    const bt=this.add.text(W/2,H/2+100,bLabel,{fontFamily:'Arial',fontSize:'15px',fontStyle:'bold',color:COL.btnTxt}).setOrigin(0.5).setDepth(83);g.add(bt);
+    btn.on('pointerdown',()=>{this.clearOverlay();if(isWS)this.showWholesale();else this.resetDay();});
+  }
+
+  resetDay(){
+    this._wsScroll=null;
+    this.phase='CLOSED';this.sign.setTexture('spr_sign_closed');this.signTxt.setText('GESLOTEN');this.updHUD();this.updStorCounts();
+    this.refreshAppSlots();
+  }
+
+  // ---- WHOLESALE ----
+  showWholesale(){
+    this.phase='WHOLESALE';this.clearOverlay();
+    const g=this.overlayGrp=this.add.group();
+    g.add(this.add.rectangle(W/2,H/2,W,H,0x000000,0.8).setDepth(80).setInteractive());
+
+    const pw=720,ph=650;
+    const panTop=H/2-ph/2,panBot=H/2+ph/2,panLeft=W/2-pw/2;
+    g.add(this.add.rectangle(W/2,H/2,pw,ph,0xFFF8E1).setDepth(81).setStrokeStyle(3,hx(COL.tableDark)));
+
+    // Vaste kop
+    const balTxt=this.add.text(W/2,panTop+28,'🛒 Groothandel — Saldo: €'+this.st.money.toFixed(2),{
+      fontFamily:'Georgia,serif',fontSize:'18px',fontStyle:'bold',color:'#3E2723'}).setOrigin(0.5).setDepth(84);
+    g.add(balTxt);
+    g.add(this.add.text(W/2,panTop+50,'▲▼ sleep of scroll om de lijst te bewegen',{
+      fontFamily:'Arial',fontSize:'10px',color:'#8D6E63',fontStyle:'italic'}).setOrigin(0.5).setDepth(84));
+
+    // Scroll-viewport (tussen kop en voettekst)
+    const vpTop=panTop+66, vpBot=panBot-58, vpH=vpBot-vpTop;
+
+    // Scroll-container: kinderen op absolute coords, scrollen via sc.y
+    const sc=this.add.container(0,0).setDepth(82);g.add(sc);
+    const T=o=>{sc.add(o);return o;};
+
+    // Mask zodat inhoud netjes binnen de viewport blijft
+    const mg=this.make.graphics();mg.fillStyle(0xffffff);mg.fillRect(panLeft,vpTop,pw,vpH);
+    sc.setMask(mg.createGeometryMask());g.add(mg);
+
+    let y=vpTop;const lx=panLeft+20,rx=panLeft+pw-60;
+
+    // --- INGREDIENTS ---
+    T(this.add.text(lx,y,'📦 Voorraad',{fontFamily:'Arial',fontSize:'13px',fontStyle:'bold',color:'#5D4037'}));
+    y+=22;
+    const packs={coffeeBeans:{pr:5,am:10,l:'Koffie ×10'},milk:{pr:4,am:10,l:'Melk ×10'},
+      pastry:{pr:6,am:8,l:'Deeg ×8'},fruit:{pr:5,am:8,l:'Fruit ×8'},
+      tea:{pr:3,am:10,l:'Thee ×10'},cacao:{pr:4,am:8,l:'Cacao ×8'}};
+    for(const[k,pk]of Object.entries(packs)){
+      const row=T(this.add.text(lx,y,pk.l+' ('+(this.st.inv[k]||0)+')',{fontFamily:'Arial',fontSize:'12px',color:'#5D4037'}));
+      const b=T(this.add.text(rx,y,'€'+pk.pr,{fontFamily:'Arial',fontSize:'11px',fontStyle:'bold',color:'#FFF',backgroundColor:'#6D4C41',padding:{x:8,y:3}}).setOrigin(0.5).setInteractive({useHandCursor:true}));
+      b.on('pointerdown',p=>{
+        if(p&&p.getDistance&&p.getDistance()>10)return;
+        if(this.st.money>=pk.pr){this.st.money-=pk.pr;this.st.inv[k]=(this.st.inv[k]||0)+pk.am;
+          balTxt.setText('🛒 Groothandel — Saldo: €'+this.st.money.toFixed(2));
+          row.setText(pk.l+' ('+(this.st.inv[k])+')');this.updHUD();this.updStorCounts();this.sfx('money');
+        }else this.toast('Niet genoeg geld!','#FF5252');
+      });
+      y+=22;
+    }
+    y+=10;
+
+    // --- NEW APPLIANCES ---
+    T(this.add.text(lx,y,'🔧 Nieuwe Apparaten',{fontFamily:'Arial',fontSize:'13px',fontStyle:'bold',color:'#5D4037'}));
+    y+=22;
+    const buyable=['oven','waffleIron','teaMaker'];
+    for(const ak of buyable){
+      const owned=this.st.appSlots.includes(ak);
+      const at=APP_TYPES[ak];
+      const row=T(this.add.text(lx,y,at.label+(owned?' ✓ Gekocht':''),{fontFamily:'Arial',fontSize:'12px',color:owned?'#81C784':'#5D4037'}));
+      if(!owned){
+        const emptyIdx=this.st.appSlots.indexOf(null);
+        const b=T(this.add.text(rx,y,emptyIdx===-1?'Vol':'€'+at.price,{fontFamily:'Arial',fontSize:'11px',fontStyle:'bold',color:'#FFF',backgroundColor:emptyIdx===-1?'#9E9E9E':'#6D4C41',padding:{x:8,y:3}}).setOrigin(0.5).setInteractive({useHandCursor:true}));
+        b.on('pointerdown',p=>{
+          if(p&&p.getDistance&&p.getDistance()>10)return;
+          if(emptyIdx===-1){this.toast('Geen lege plek!','#FF5252');return;}
+          if(this.st.money>=at.price){this.st.money-=at.price;this.st.appSlots[emptyIdx]=ak;
+            balTxt.setText('🛒 Groothandel — Saldo: €'+this.st.money.toFixed(2));
+            row.setText(at.label+' ✓ Gekocht');row.setColor('#81C784');b.destroy();
+            this.updHUD();this.sfx('done');
+          }else this.toast('Niet genoeg geld!','#FF5252');
+        });
+      }
+      y+=22;
+    }
+    y+=10;
+
+    // --- UPGRADES ---
+    T(this.add.text(lx,y,'⬆️ Upgrades',{fontFamily:'Arial',fontSize:'13px',fontStyle:'bold',color:'#5D4037'}));
+    y+=22;
+    const upgs=[
+      {k:'tablesUnlocked',l:'Extra tafel',max:6,pr:30,tbl:true},
+      {k:'servingSlotsUnlocked',l:'Extra uitgifte-vak',max:3,pr:25,srv:true},
+      {k:'waiterSpeed',l:'Bediende snelheid',max:3,pr:20,appUpg:true},
+      ...this.ownedApps().map(a=>({k:a,l:APP_TYPES[a].label+' snelheid',max:3,pr:20,appUpg:true}))
+    ];
+    for(const u of upgs){
+      const cur=u.tbl?this.st.tablesUnlocked:u.srv?this.st.servingSlotsUnlocked:(this.st.appLevels[u.k]||1);
+      const mx=cur>=u.max;
+      const row=T(this.add.text(lx,y,u.l+' ('+cur+'/'+u.max+')',{fontFamily:'Arial',fontSize:'12px',color:mx?'#81C784':'#5D4037'}));
+      if(!mx){
+        const cost=u.pr*cur;
+        const b=T(this.add.text(rx,y,'€'+cost,{fontFamily:'Arial',fontSize:'11px',fontStyle:'bold',color:'#FFF',backgroundColor:'#6D4C41',padding:{x:8,y:3}}).setOrigin(0.5).setInteractive({useHandCursor:true}));
+        b.on('pointerdown',p=>{
+          if(p&&p.getDistance&&p.getDistance()>10)return;
+          const c2=u.tbl?this.st.tablesUnlocked:u.srv?this.st.servingSlotsUnlocked:(this.st.appLevels[u.k]||1);
+          const cost2=u.pr*c2;
+          if(c2>=u.max)return;
+          if(this.st.money>=cost2){this.st.money-=cost2;
+            if(u.tbl){this.st.tablesUnlocked++;this.unlockTbl(this.st.tablesUnlocked-1);}
+            else if(u.srv){this.st.servingSlotsUnlocked++;this.unlockServ();}
+            else if(u.appUpg){this.st.appLevels[u.k]=(this.st.appLevels[u.k]||1)+1;}
+            const nc=u.tbl?this.st.tablesUnlocked:u.srv?this.st.servingSlotsUnlocked:(this.st.appLevels[u.k]||1);
+            row.setText(u.l+' ('+nc+'/'+u.max+')');
+            if(nc>=u.max){row.setColor('#81C784');b.destroy();}else b.setText('€'+(u.pr*nc));
+            balTxt.setText('🛒 Groothandel — Saldo: €'+this.st.money.toFixed(2));
+            this.updHUD();this.sfx('done');
+          }else this.toast('Niet genoeg geld!','#FF5252');
+        });
+      }
+      y+=22;
+    }
+    y+=12;
+
+    // --- SCROLL-LOGICA ---
+    const contentBottom=y;
+    const maxScroll=Math.max(0,contentBottom-vpBot);
+    const setScroll=v=>{sc.y=Phaser.Math.Clamp(v,-maxScroll,0);};
+    setScroll(0);
+    this._wsScroll=dy=>setScroll(sc.y-dy*0.4);
+
+    // Sleep-zone (achter de knoppen) om met vinger te scrollen
+    const dz=this.add.zone(W/2,(vpTop+vpBot)/2,pw,vpH).setInteractive().setDepth(81.5);g.add(dz);
+    let dragging=false,lastPY=0;
+    dz.on('pointerdown',p=>{dragging=true;lastPY=p.y;});
+    dz.on('pointermove',p=>{if(dragging){setScroll(sc.y+(p.y-lastPY));lastPY=p.y;}});
+    dz.on('pointerup',()=>{dragging=false;});
+    dz.on('pointerout',()=>{dragging=false;});
+
+    // Vaste voettekst + sluitknop
+    const cb=this.add.image(W/2,panBot-32,'ui_btn_w').setDepth(84).setInteractive({useHandCursor:true});g.add(cb);
+    g.add(this.add.text(W/2,panBot-32,'→ Volgende Week',{fontFamily:'Arial',fontSize:'15px',fontStyle:'bold',color:COL.btnTxt}).setOrigin(0.5).setDepth(85));
+    cb.on('pointerdown',()=>{this._wsScroll=null;save(this.st);this.clearOverlay();this.resetDay();});
+  }
+
+  unlockTbl(idx){
+    if(idx>=0&&idx<this.tables.length){
+      const t=this.tables[idx];t.ul=true;t.spr.setAlpha(1);t.chL.setAlpha(1);t.chR.setAlpha(1);
+    }
+  }
+  unlockServ(){
+    for(let i=0;i<this.st.servingSlotsUnlocked;i++){
+      this.servSprites[i].setTexture('spr_servslot').setAlpha(1);
+    }
+  }
+  refreshAppSlots(){
+    for(let i=0;i<6;i++){
+      const type=this.st.appSlots[i];
+      this.appSprites[i].setTexture(type?'spr_app_'+type:'spr_app_empty');
+      this.appLabels[i].setText(type?APP_TYPES[type].label:'Leeg');
+      this.appStartBtns[i].img.setVisible(!!type);
+      this.appStartBtns[i].txt.setVisible(!!type);
+    }
+  }
+
+  // ---- MENU OVERLAY ----
+  showMenu(){
+    this.clearOverlay();
+    const g=this.overlayGrp=this.add.group();
+    g.add(this.add.rectangle(W/2,H/2,W,H,0x000000,0.8).setDepth(80).setInteractive());
+    const pw=600,ph=660;
+    g.add(this.add.rectangle(W/2,H/2,pw,ph,0xFFF8E1).setDepth(81).setStrokeStyle(3,hx(COL.tableDark)));
+    g.add(this.add.text(W/2,H/2-ph/2+22,'📋 Menukaart',{fontFamily:'Georgia,serif',fontSize:'20px',fontStyle:'bold',color:'#3E2723'}).setOrigin(0.5).setDepth(82));
+
+    const owned=new Set(this.ownedApps());
+    let y=H/2-ph/2+50;
+    const lx=W/2-pw/2+20;
+
+    // Group by appliance
+    const appOrder=['espressoMachine','milkFrother','blender','oven','waffleIron','teaMaker'];
+    for(const appKey of appOrder){
+      const at=APP_TYPES[appKey];
+      const hasApp=owned.has(appKey);
+      g.add(this.add.text(lx,y,(hasApp?'✅':'🔒')+' '+at.label,{
+        fontFamily:'Arial',fontSize:'13px',fontStyle:'bold',color:hasApp?'#3E2723':'#9E9E9E'
+      }).setDepth(82));
+      y+=20;
+
+      const recs=Object.entries(RECIPES).filter(([,r])=>r.app===appKey);
+      for(const[rk,r]of recs){
+        if(hasApp){
+          const ings=Object.entries(r.ing).map(([k,v])=>(STOR[k]?STOR[k].label:k)+'×'+v).join(' + ');
+          g.add(this.add.text(lx+12,y,r.icon+' '+r.n+'  —  '+ings+'  →  €'+r.p.toFixed(2),{
+            fontFamily:'Arial',fontSize:'11px',color:'#5D4037'
+          }).setDepth(82));
+        }else{
+          g.add(this.add.text(lx+12,y,'❓ Onbekend  —  Vereist: '+at.label,{
+            fontFamily:'Arial',fontSize:'11px',color:'#BDBDBD',fontStyle:'italic'
+          }).setDepth(82));
+        }
+        y+=17;
+      }
+      y+=8;
+    }
+
+    // Mystery recipes
+    g.add(this.add.text(lx,y,'✨ Geheime Recepten',{fontFamily:'Arial',fontSize:'13px',fontStyle:'bold',color:'#FF8F00'}).setDepth(82));
+    y+=20;
+    for(const hint of MYSTERY){
+      g.add(this.add.text(lx+12,y,'🔮 ???  —  '+hint,{fontFamily:'Arial',fontSize:'10px',color:'#BDBDBD',fontStyle:'italic'}).setDepth(82));
+      y+=16;
+    }
+
+    // Close
+    const cb=this.add.text(W/2,H/2+ph/2-25,'✕ Sluiten',{fontFamily:'Arial',fontSize:'14px',fontStyle:'bold',color:'#FFF',backgroundColor:'#6D4C41',padding:{x:16,y:6}}).setOrigin(0.5).setDepth(83).setInteractive({useHandCursor:true});
+    g.add(cb);cb.on('pointerdown',()=>this.clearOverlay());
+  }
+
+  clearOverlay(){if(this.overlayGrp){this.overlayGrp.destroy(true);this.overlayGrp=null;}}
+
+  // ---- DAY / NIGHT / CLOCK ----
+  updateTime(delta){
+    if(this.phase!=='OPEN'&&this.phase!=='CLOSING')return;
+    // ~3 min real = 14h game (480→1320 min = 840 game-min)
+    this.timeAccum+=delta;
+    const REAL_SEC_PER_GAME_MIN=180/840; // 0.214 sec per game-min
+    while(this.timeAccum>=REAL_SEC_PER_GAME_MIN*1000){
+      this.timeAccum-=REAL_SEC_PER_GAME_MIN*1000;
+      this.gameMinute++;
+    }
+
+    // Auto-close at 20:00
+    if(this.gameMinute>=1200&&this.phase==='OPEN'){
+      this.phase='CLOSING';
+      this.sign.setTexture('spr_sign_closed');this.signTxt.setText('DICHT');
+      this.toast('Sluitingstijd! Laatste gasten...','#FF9800');
+    }
+    // Force end at 22:00
+    if(this.gameMinute>=1320){
+      // Remove remaining customers nicely
+      [...this.customers].forEach(c=>{
+        if(c.state!=='EATING'&&c.state!=='SERVED'&&c.state!=='LEAVING'){
+          c.state='LEAVING';
+          this.tweens.add({targets:c.spr,x:50,y:H-100,alpha:0,duration:800,
+            onComplete:()=>this.removeCust(c)});
+        }
+      });
+      if(this.customers.every(c=>c.state==='LEAVING'||c.state==='EATING'||c.state==='SERVED')){
+        // Wait a bit then end
+        if(!this._endTimer){this._endTimer=true;
+          this.time.delayedCall(2500,()=>{
+            this.customers.filter(c=>c.state!=='LEAVING').forEach(c=>{
+              this.tweens.add({targets:c.spr,x:50,y:H-100,alpha:0,duration:600,onComplete:()=>this.removeCust(c)});
+            });
+            this.time.delayedCall(800,()=>{this._endTimer=false;this.endDay();});
+          });
+        }
+      }
+    }
+
+    this.updHUD();
+
+    // Dag/nacht: interieur dimt geleidelijk (geen kleurtint, want binnenshuis verkleurt niet blauw)
+    const prog=(this.gameMinute-480)/840; // 0-1
+    let darkness;
+    if(prog<0.55) darkness=0;                          // Overdag: volledig fel
+    else if(prog<0.8) darkness=(prog-0.55)/0.25*0.25;   // Avondschemer: geleidelijk dimmen tot 25%
+    else darkness=0.25+(prog-0.8)/0.2*0.15;             // Nacht: verder dimmen tot 40%
+    this.skyRect.setFillStyle(0x0D1B2A,Math.min(0.4,Math.max(0,darkness)));
+
+    // Ramen tonen warme gloed bij avond/nacht
+    const windowTint=prog<0.55?0xFFFFFF:
+      Phaser.Display.Color.GetColor(255,Math.floor(220-prog*60),Math.floor(140-prog*40));
+    this.windows.forEach(w=>w.setTint(windowTint));
+    this.dnDot.setFillStyle(prog<0.3?0xFFEB3B:prog<0.7?0xFF9800:0x5C6BC0);
+  }
+
+  // ---- TOAST ----
+  toast(msg,col){
+    const t=this.add.text(W/2,H-50,msg,{fontFamily:'Arial',fontSize:'13px',fontStyle:'bold',
+      color:col||'#FFF',backgroundColor:'#333333DD',padding:{x:10,y:5}}).setOrigin(0.5).setDepth(90);
+    this.tweens.add({targets:t,y:H-90,alpha:{from:1,to:0},duration:2500,ease:'Cubic.easeOut',onComplete:()=>t.destroy()});
+  }
+
+  // ---- SFX ----
+  sfx(type){
+    if(!this.audioOK)return;
+    try{
+      const ctx=this.sound.context;if(!ctx||ctx.state!=='running')return;
+      const o=ctx.createOscillator(),gn=ctx.createGain();o.connect(gn);gn.connect(ctx.destination);gn.gain.value=0.1;
+      const t=ctx.currentTime;
+      switch(type){
+        case'bell':o.type='sine';o.frequency.value=1200;gn.gain.exponentialRampToValueAtTime(0.001,t+0.4);o.start();o.stop(t+0.4);break;
+        case'pop':o.type='sine';o.frequency.value=600;gn.gain.exponentialRampToValueAtTime(0.001,t+0.12);o.start();o.stop(t+0.12);break;
+        case'money':o.type='triangle';o.frequency.value=880;o.frequency.exponentialRampToValueAtTime(1320,t+0.15);gn.gain.exponentialRampToValueAtTime(0.001,t+0.3);o.start();o.stop(t+0.3);break;
+        case'done':o.type='sine';o.frequency.value=523;o.frequency.setValueAtTime(659,t+0.12);o.frequency.setValueAtTime(784,t+0.24);gn.gain.exponentialRampToValueAtTime(0.001,t+0.5);o.start();o.stop(t+0.5);break;
+        case'process':o.type='sawtooth';o.frequency.value=200;gn.gain.value=0.03;gn.gain.exponentialRampToValueAtTime(0.001,t+0.5);o.start();o.stop(t+0.5);break;
+        case'place':o.type='sine';o.frequency.value=440;gn.gain.exponentialRampToValueAtTime(0.001,t+0.1);o.start();o.stop(t+0.1);break;
+        default:o.disconnect();gn.disconnect();
+      }
+    }catch(e){}
+  }
+
+  // ---- UPDATE ----
+  update(time,delta){
+    this.updateTime(delta);
+    this.updatePatience(delta);
+    if(this.phase==='OPEN'){
+      this.custTimer+=delta;
+      // Spawn rate varies by time of day
+      const h=this.gameMinute/60;
+      let interval=7000;
+      if(h>=11&&h<14)interval=4000;      // Lunch rush
+      else if(h>=17&&h<20)interval=5000;  // Evening rush
+      else if(h>=8&&h<11)interval=8000;   // Morning
+      else interval=9000;                  // Quiet
+      if(this.custTimer>=interval){
+        this.custTimer=0;this.spawnCust();
+      }
+    }
+  }
+}
+
+// ============================================================
+//  PHASER CONFIG
+// ============================================================
+const config={
+  type:Phaser.AUTO,width:W,height:H,parent:document.body,
+  backgroundColor:'#2c1810',pixelArt:true,roundPixels:true,
+  render:{antialias:false,pixelArt:true},
+  scale:{mode:Phaser.Scale.FIT,autoCenter:Phaser.Scale.CENTER_BOTH},
+  input:{activePointers:3,touch:{capture:true}},
+  scene:[BootScene,GameScene]
+};
+const game=new Phaser.Game(config);
+document.addEventListener('gesturestart',e=>e.preventDefault(),{passive:false});
+document.addEventListener('gesturechange',e=>e.preventDefault(),{passive:false});
+document.addEventListener('gestureend',e=>e.preventDefault(),{passive:false});
+document.addEventListener('dblclick',e=>e.preventDefault(),{passive:false});
+
+// ------------------------------------------------------------------
+// iPad/iOS Safari fix: de zichtbare viewporthoogte verandert doordat de
+// adresbalk in-/uitklapt, maar Phaser's Scale.FIT hoort dit niet altijd
+// automatisch mee. Forceer daarom expliciet een herberekening bij resize,
+// rotatie en visualViewport-wijzigingen, plus kort na het opstarten
+// (Safari rapporteert de echte hoogte soms pas na de eerste paint).
+// ------------------------------------------------------------------
+function refreshGameScale(){ if(game&&game.scale)game.scale.refresh(); }
+window.addEventListener('resize',refreshGameScale);
+window.addEventListener('orientationchange',()=>setTimeout(refreshGameScale,300));
+if(window.visualViewport){
+  window.visualViewport.addEventListener('resize',refreshGameScale);
+  window.visualViewport.addEventListener('scroll',refreshGameScale);
+}
+setTimeout(refreshGameScale,300);
+setTimeout(refreshGameScale,1000);
+}
+// Wacht tot Phaser (van CDN of fallback-CDN) geladen is voordat de game start.
+(function waitPhaser(t){
+  if(window.Phaser){__boot();return;}
+  if(t>200){document.body.innerHTML='<div style="color:#FFE0B2;font-family:Arial;padding:24px;text-align:center">'+
+    '⚠️ Kon Phaser niet laden.<br>Controleer je internetverbinding en herlaad de pagina.</div>';return;}
+  setTimeout(()=>waitPhaser(t+1),50);
+})(0);
+</script>
+</body>
+</html>
